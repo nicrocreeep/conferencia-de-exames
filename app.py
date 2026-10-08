@@ -563,6 +563,8 @@ EXAM_EXPLICIT_ALIASES = {
     # Nomenclaturas exatamente observadas no relatório do Benner.
     "AUDIOMETRIA TONAL OCUPACIONAL": "AUDIOMETRIA",
     "AVAL PSICOLOGICA PSICOSSOCIAL": "AVAL_PSI_PSICOSSOCIAL",
+    "AVALIACAO PSICOLOGICO": "AVAL_PSI_PSICOSSOCIAL",
+    "AVALIACAO PSICOLOGICA": "AVAL_PSI_PSICOSSOCIAL",
     "AVALIACAO DA ACUIDADE VISUAL": "ACUIDADE_VISUAL",
     "CADMIO URINA": "CADMIO",
     "CHUMBO URINA": "CHUMBO",
@@ -725,7 +727,11 @@ def requirement_for_exam(pcmso_exam: str):
     if "TGO" in n and "TGP" in n:
         return "AND", ["TGO", "TGP"]
 
-    if "URINA" in n and "ACIDO HIPURICO" in n and "ACIDO METIL" in n:
+    if (
+        "URINA" in n
+        and "ACIDO HIPURICO" in n
+        and "METIL HIPURICO" in n
+    ):
         return "AND", ["ACIDO_HIPURICO", "ACIDO_METIL_HIPURICO"]
 
     if (
@@ -755,6 +761,56 @@ def requirement_for_exam(pcmso_exam: str):
         return "SINGLE", [key]
 
     return "UNKNOWN", []
+
+
+def pcmso_allows_benner_exam(
+    cargo: str,
+    exam_key_benner: str,
+    aso_key: str,
+    matched_role_groups,
+    exams_by_group,
+) -> Tuple[bool, bool]:
+    """
+    Confere diretamente no PCMSO se o exame do Benner:
+      1) existe entre os exames previstos para o grupo do cargo;
+      2) está previsto para o ASO analisado.
+
+    O segundo retorno diferencia "exame não previsto" de
+    "exame previsto, mas quadrinho não previsto para aquele ASO".
+    """
+    found_in_pcmso = False
+    allowed_for_aso = False
+
+    field_map = {
+        "admissional": "Admissao",
+        "periodico": "Periodicidade",
+        "mudanca_funcao": "Mudanca_Risco_Retorno",
+        "demissional": "Demissao",
+    }
+    pcmso_field = field_map.get(aso_key, "")
+
+    for group_key in matched_role_groups.get(cargo, set()):
+        group_rows = exams_by_group.get(
+            (str(group_key[0]), str(group_key[1])),
+            [],
+        )
+
+        for exam_row in group_rows:
+            mode, components = requirement_for_exam(
+                str(exam_row["Exame PCMSO"]).strip()
+            )
+
+            if exam_key_benner not in components:
+                continue
+
+            found_in_pcmso = True
+
+            if pcmso_field and pcms_is_required(
+                exam_row.get(pcmso_field, "")
+            ):
+                allowed_for_aso = True
+
+    return found_in_pcmso, allowed_for_aso
 
 
 def build_benner_exam_map(benner_df: pd.DataFrame):
@@ -1251,8 +1307,8 @@ def audit_exams(
             for row in rows:
                 exam_name = str(row.get("Exame", "")).strip()
 
-                # Exames fora do vocabulário conhecido são reportados como extras,
-                # não como correspondência provável.
+                # Exames fora do vocabulário conhecido continuam sendo
+                # reportados como extras.
                 if not exam_key_benner:
                     extra_rows.append({
                         "Cargo": cargo,
@@ -1263,31 +1319,9 @@ def audit_exams(
                     })
                     continue
 
-                req = required_by_role.get(cargo, {}).get(exam_key_benner)
-
-                if req is None:
-                    # Pode ser componente alternativo de um grupo OR.
-                    alt = False
-                    for component, entry in required_by_role.get(cargo, {}).items():
-                        for or_group in entry.get("or_groups", []):
-                            if exam_key_benner in or_group["components"]:
-                                alt = True
-                                break
-                        if alt:
-                            break
-
-                    if not alt:
-                        extra_rows.append({
-                            "Cargo": cargo,
-                            "Exame no Benner": exam_name,
-                            "ASO": "Exame",
-                            "Valor": "",
-                            "Motivo": "EXAME NÃO PREVISTO NO PCMSO PARA O CARGO",
-                        })
-                        continue
-                    req = None
-
-                # Se é uma alternativa OR, não sinaliza como extra apenas por existir.
+                # O cruzamento é feito diretamente contra os exames do grupo
+                # do cargo no PCMSO. Isso evita falsos extras causados por
+                # nomenclaturas compostas ou pequenas diferenças de cargo.
                 for aso_key, label in [
                     ("admissional", "Admissional"),
                     ("periodico", "Periódico"),
@@ -1299,42 +1333,23 @@ def audit_exams(
                     if not is_marked(value):
                         continue
 
-                    allowed = False
+                    found_in_pcmso, allowed_for_aso = pcmso_allows_benner_exam(
+                        cargo,
+                        exam_key_benner,
+                        aso_key,
+                        matched_role_groups,
+                        exams_by_group,
+                    )
 
-                    if req is not None:
-                        allowed = bool(req.get(aso_key, False))
-
-                    if not allowed:
-                        # Se for uma alternativa OR permitida pelo PCMSO, aceita.
-                        for component_entry in required_by_role.get(cargo, {}).values():
-                            for or_group in component_entry.get("or_groups", []):
-                                if exam_key_benner in or_group["components"]:
-                                    # Para o grupo OR, considera permitido se o exame
-                                    # correspondente estiver previsto no PCMSO para
-                                    # o mesmo ASO.
-                                    for group_key in matched_role_groups.get(cargo, set()):
-                                        for exam_row in exams_by_group.get(
-                                            (str(group_key[0]), str(group_key[1])),
-                                            [],
-                                        ):
-                                            if str(exam_row["Exame PCMSO"]).strip() == or_group["exam"]:
-                                                if pcms_is_required(exam_row.get(
-                                                    "Admissao" if aso_key == "admissional"
-                                                    else "Periodicidade" if aso_key == "periodico"
-                                                    else "Mudanca_Risco_Retorno" if aso_key == "mudanca_funcao"
-                                                    else "Demissao",
-                                                    "",
-                                                )):
-                                                    allowed = True
-                                                    break
-                                        if allowed:
-                                            break
-                                    if allowed:
-                                        break
-                            if allowed:
-                                break
-
-                    if not allowed:
+                    if not found_in_pcmso:
+                        extra_rows.append({
+                            "Cargo": cargo,
+                            "Exame no Benner": exam_name,
+                            "ASO": label,
+                            "Valor": str(value),
+                            "Motivo": "EXAME NÃO PREVISTO NO PCMSO PARA O CARGO",
+                        })
+                    elif not allowed_for_aso:
                         extra_rows.append({
                             "Cargo": cargo,
                             "Exame no Benner": exam_name,
