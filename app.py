@@ -585,13 +585,24 @@ EXAM_EXPLICIT_ALIASES = {
     "TGO TRANSAMINASE OXALACETICA": "TGO",
     "TGP TRANSAMINASE PIRUVICA": "TGP",
     "TIPAGEM SANGUE E FATOR RH": "TIPAGEM_SANG",
+    "CONTAGEM DE RETICULOCITOS": "RETICULOCITOS",
+    "CONTAGEM DE RETICULOCITOS PERCENTUAL E ABSOLUTA": "RETICULOCITOS",
+    "ACIDO TRANS TRANS MUCONICO URINARIO": "ACIDO_TRANS_TRANS_MUCONICO",
 }
 
 
 def exam_key(text: str) -> str:
     n = normalize_exam(text)
 
-    # Primeiro aplica aliases explícitos do Benner/PCMSO.
+    # Primeiro reconhece os dois exames adicionados ao PCMSO da Braskem.
+    # O Benner pode exibir um código numérico antes do nome do exame; por isso
+    # usamos palavras-chave e não dependemos de igualdade exata.
+    if "RETICULOCITO" in n:
+        return "RETICULOCITOS"
+    if "MUCONICO" in n and "TRANS" in n and "ACIDO" in n:
+        return "ACIDO_TRANS_TRANS_MUCONICO"
+
+    # Depois aplica aliases explícitos do Benner/PCMSO.
     if n in EXAM_EXPLICIT_ALIASES:
         return EXAM_EXPLICIT_ALIASES[n]
 
@@ -1056,59 +1067,37 @@ def audit_exams(
             for aso_key, pcmso_field in PCMSO_LOGICAL_ASOS.items():
                 pc_required = pcms_is_required(fields[aso_key])
 
-                # Mudança de risco/Retorno no PCMSO exige os dois campos do Benner.
+                # O PCMSO agrupa Mudança de Risco Ocupacional e Retorno.
+                # No relatório do Benner, R. Trabalho está saindo com valores
+                # numéricos/códigos inconsistentes. Por isso ele é ignorado por
+                # completo: somente M. Função participa da conferência.
                 if aso_key == "mudanca_funcao":
                     benner_change_available = not benner_df["ASO_mudanca_funcao"].isna().all()
-                    benner_return_available = not benner_df["ASO_retorno"].isna().all()
 
                     change_values = [
                         row.get("ASO_mudanca_funcao")
                         for comp in requirement["components"]
                         for row in comp["rows"]
                     ]
-                    return_values = [
-                        row.get("ASO_retorno")
-                        for comp in requirement["components"]
-                        for row in comp["rows"]
-                    ]
+
+                    change_marked = any(is_marked(v) for v in change_values)
 
                     if pc_required:
-                        change_ok = (
-                            benner_change_available
-                            and any(is_marked(v) for v in change_values)
-                        )
-                        return_ok = (
-                            benner_return_available
-                            and any(is_marked(v) for v in return_values)
-                        )
-
-                        # O PCMSO agrupa Mudança de Risco Ocupacional e Retorno.
-                        # Nesta versão, a auditoria usa M. Função como requisito principal.
-                        # R. Trabalho é exibido como informação, mas não gera FALTA,
-                        # pois o relatório atual pode trazer essa coluna como N para todos.
                         if not benner_change_available:
                             status = "NÃO CONFERIDO — COLUNA AUSENTE"
-                        elif change_ok:
+                        elif change_marked:
                             status = "OK"
                         else:
                             status = "FALTA"
                             overall_missing = True
                     else:
-                        # Se o PCMSO não marcou, ambos os campos deveriam ficar
-                        # desmarcados. Marca como extra se qualquer um estiver S.
-                        extra_change = any(is_marked(v) for v in change_values)
-                        extra_return = any(is_marked(v) for v in return_values)
-
-                        if extra_change or extra_return:
-                            status = "EXTRA NO BENNER"
-                        else:
-                            status = "OK"
+                        # Nunca gerar EXTRA por causa da coluna R. Trabalho.
+                        status = "EXTRA NO BENNER" if change_marked else "OK"
 
                     benner_display = (
                         "Mud. Função="
-                        + ("S" if change_values and any(is_marked(v) for v in change_values) else "N")
-                        + " | Retorno="
-                        + ("S" if return_values and any(is_marked(v) for v in return_values) else "N")
+                        + ("S" if change_marked else "N")
+                        + " | R. Trabalho=IGNORADO"
                     )
 
                 else:
