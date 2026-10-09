@@ -996,6 +996,7 @@ def audit_exams(
     detailed_rows = []
     pending_rows = []
     extra_rows = []
+    extra_cargo_rows = []
     role_status_rows = []
     missing_pcmso_roles = []
 
@@ -1235,9 +1236,28 @@ def audit_exams(
                 "Status": "CARGO DO PCMSO NÃO ENCONTRADO NO BENNER",
             })
 
-    # Extras no Benner:
-    # 1) exame desconhecido / não requerido para o cargo
-    # 2) quadrinho marcado onde o PCMSO está em branco.
+    # CARGOS EXTRAS:
+    # Cargos existentes no relatório do Benner que não encontraram nenhum
+    # grupo/cargo correspondente no PCMSO ficam em uma aba separada.
+    # Todos os exames cadastrados para esses cargos são listados ali e não
+    # poluem a aba de extras de exames dos cargos que têm correspondência.
+    extra_cargo_names = set(benner_roles) - set(matched_role_groups.keys())
+    if extra_cargo_names:
+        unmatched_df = benner_df[benner_df["Cargo"].astype(str).str.strip().isin(extra_cargo_names)]
+        for _, row in unmatched_df.iterrows():
+            extra_cargo_rows.append({
+                "Projeto": str(row.get("Projeto", "") or "").strip(),
+                "Cargo no Benner": str(row.get("Cargo", "") or "").strip(),
+                "Exame no Benner": str(row.get("Exame", "") or "").strip(),
+                "Admissional": str(row.get("ASO_admissional", "") or "").strip(),
+                "Demissional": str(row.get("ASO_demissional", "") or "").strip(),
+                "Periódico": str(row.get("ASO_periodico", "") or "").strip(),
+                "Mudança de Função": str(row.get("ASO_mudanca_funcao", "") or "").strip(),
+                "Status": "CARGO DO BENNER NÃO LOCALIZADO NO PCMSO",
+            })
+
+    # Extras em cargos que possuem correspondência no PCMSO:
+    # exame não previsto para o cargo ou quadrinho marcado onde o PCMSO está em branco.
     required_by_role = defaultdict(dict)
 
     for cargo, group_keys in matched_role_groups.items():
@@ -1289,6 +1309,11 @@ def audit_exams(
                     )
 
     for cargo in benner_roles:
+        # Cargos sem correspondência no PCMSO já estão em "Cargos extras".
+        # Não duplicar todos os seus exames na tabela de extras por exame.
+        if cargo not in matched_role_groups:
+            continue
+
         role_key = normalize_role(cargo)
         cargo_map = benner_exam_map.get(role_key, {})
 
@@ -1350,6 +1375,19 @@ def audit_exams(
     detailed_df = pd.DataFrame(detailed_rows)
     pending_df = pd.DataFrame(pending_rows)
     extras_df = pd.DataFrame(extra_rows)
+    extra_cargos_df = pd.DataFrame(
+        extra_cargo_rows,
+        columns=[
+            "Projeto",
+            "Cargo no Benner",
+            "Exame no Benner",
+            "Admissional",
+            "Demissional",
+            "Periódico",
+            "Mudança de Função",
+            "Status",
+        ],
+    )
     role_status_df = pd.DataFrame(role_status_rows)
     missing_roles_df = pd.DataFrame(missing_pcmso_roles)
 
@@ -1365,6 +1403,8 @@ def audit_exams(
             detailed_df["Status"].astype(str).str.startswith("NÃO CONFERIDO").sum()
         ) if not detailed_df.empty else 0,
         "extras_benner": len(extras_df),
+        "cargos_extras": int(len(extra_cargo_names)),
+        "linhas_cargos_extras": int(len(extra_cargos_df)),
         "atendidos": int(
             (role_status_df["Status"] == "ATENDIDO").sum()
         ) if not role_status_df.empty else 0,
@@ -1380,6 +1420,7 @@ def audit_exams(
         detailed_df,
         pending_df,
         extras_df,
+        extra_cargos_df,
         missing_roles_df,
     )
 
@@ -1449,6 +1490,7 @@ def build_excel(
     detailed_df,
     pending_df,
     extras_df,
+    extra_cargos_df,
     missing_roles_df,
 ):
     output = io.BytesIO()
@@ -1462,7 +1504,9 @@ def build_excel(
         "Linhas de exames auditadas": summary["linhas_exames"],
         "Faltas": summary["pendencias"],
         "Não conferidos": summary["nao_conferidos"],
-        "Extras no Benner": summary["extras_benner"],
+        "Exames extras em cargos correspondentes": summary["extras_benner"],
+        "Cargos extras no Benner (sem correspondência no PCMSO)": summary["cargos_extras"],
+        "Linhas listadas em Cargos extras": summary["linhas_cargos_extras"],
         "Cargos atendidos": summary["atendidos"],
         "Cargos com falhas": summary["faltas_cargo"],
         "Coluna Demissional disponível": (
@@ -1476,6 +1520,7 @@ def build_excel(
         detailed_df.to_excel(writer, sheet_name="Detalhado", index=False)
         pending_df.to_excel(writer, sheet_name="Pendências", index=False)
         extras_df.to_excel(writer, sheet_name="Extras Benner", index=False)
+        extra_cargos_df.to_excel(writer, sheet_name="Cargos extras", index=False)
         missing_roles_df.to_excel(
             writer,
             sheet_name="Cargos ausentes",
@@ -1500,6 +1545,7 @@ def build_excel(
             "Detalhado": detailed_df,
             "Pendências": pending_df,
             "Extras Benner": extras_df,
+            "Cargos extras": extra_cargos_df,
             "Cargos ausentes": missing_roles_df,
         }
 
@@ -1633,6 +1679,7 @@ with st.spinner("Conferindo exames do PCMSO com o Benner..."):
         detailed_df,
         pending_df,
         extras_df,
+        extra_cargos_df,
         missing_roles_df,
     ) = audit_exams(
         benner,
@@ -1648,13 +1695,16 @@ if not summary["demissional_disponivel"]:
         "'NÃO CONFERIDO — COLUNA AUSENTE'."
     )
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Cargos no Benner", summary["cargos_benner"])
 m2.metric("Cargos no PCMSO", summary["cargos_pcmso"])
 m3.metric("Cargos atendidos", summary["atendidos"])
-m4.metric("Faltas", summary["pendencias"])
-m5.metric("Não conferidos", summary["nao_conferidos"])
-m6.metric("Extras Benner", summary["extras_benner"])
+m4.metric("Cargos extras", summary["cargos_extras"])
+
+m5, m6, m7 = st.columns(3)
+m5.metric("Faltas", summary["pendencias"])
+m6.metric("Não conferidos", summary["nao_conferidos"])
+m7.metric("Exames extras em cargos correspondentes", summary["extras_benner"])
 
 st.divider()
 
@@ -1673,78 +1723,86 @@ if summary["nao_conferidos"] > 0:
         "porque o relatório do Benner não trouxe todos os campos necessários."
     )
 
-# -------------------------------------------------------------------------
-# Filtros
-# -------------------------------------------------------------------------
-if not detailed_df.empty:
-    cargos = st.multiselect(
-        "Filtrar cargo",
-        sorted(detailed_df["Cargo"].unique()),
-    )
+# As informações mais importantes ficam na primeira aba. Os cargos que não
+# possuem correspondência no PCMSO ficam separados para não poluir a auditoria.
+tab_auditoria, tab_cargos_extras, tab_exames_extras, tab_cargos_ausentes = st.tabs([
+    "Conferência PCMSO × Benner",
+    "Cargos extras",
+    "Exames extras em cargos correspondentes",
+    "Cargos do PCMSO ausentes no Benner",
+])
 
-    status_filter = st.multiselect(
-        "Filtrar status",
-        [
-            "OK",
-            "FALTA",
-            "NÃO CONFERIDO — COLUNA AUSENTE",
-            "NÃO CONFERIDO — EXAME NÃO MAPEADO",
-            "EXTRA NO BENNER",
-        ],
-        default=["FALTA", "NÃO CONFERIDO — COLUNA AUSENTE"],
-    )
-
-    view = detailed_df.copy()
-
-    if cargos:
-        view = view[view["Cargo"].isin(cargos)]
-
-    if status_filter:
-        view = view[view["Status"].isin(status_filter)]
-
-    st.subheader("🔎 Detalhado — PCMSO × Benner")
-    st.dataframe(
-        view,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-st.subheader("📋 Status por cargo")
-st.dataframe(
-    role_status_df,
-    use_container_width=True,
-    hide_index=True,
-)
-
-with st.expander("⚠️ Pendências / não conferidos"):
-    if pending_df.empty:
-        st.success("Nenhuma pendência.")
-    else:
-        st.dataframe(
-            pending_df,
-            use_container_width=True,
-            hide_index=True,
+with tab_auditoria:
+    st.subheader("🔎 Detalhado — exames previstos no PCMSO × Benner")
+    if not detailed_df.empty:
+        cargos = st.multiselect(
+            "Filtrar cargo",
+            sorted(detailed_df["Cargo"].unique()),
+            key="filtro_cargo_auditoria",
         )
 
-with st.expander("➕ Extras cadastrados no Benner"):
+        status_filter = st.multiselect(
+            "Filtrar status",
+            [
+                "OK",
+                "FALTA",
+                "NÃO CONFERIDO — COLUNA AUSENTE",
+                "NÃO CONFERIDO — EXAME NÃO MAPEADO",
+                "EXTRA NO BENNER",
+            ],
+            default=["FALTA", "NÃO CONFERIDO — COLUNA AUSENTE"],
+            key="filtro_status_auditoria",
+        )
+
+        view = detailed_df.copy()
+        if cargos:
+            view = view[view["Cargo"].isin(cargos)]
+        if status_filter:
+            view = view[view["Status"].isin(status_filter)]
+
+        st.dataframe(view, use_container_width=True, hide_index=True)
+    else:
+        st.info("Não há linhas para exibir na auditoria.")
+
+    st.subheader("📋 Status por cargo")
+    st.dataframe(role_status_df, use_container_width=True, hide_index=True)
+
+    with st.expander("⚠️ Pendências / não conferidos"):
+        if pending_df.empty:
+            st.success("Nenhuma pendência.")
+        else:
+            st.dataframe(pending_df, use_container_width=True, hide_index=True)
+
+with tab_cargos_extras:
+    st.subheader("Cargos cadastrados no Benner sem correspondência no PCMSO")
+    st.caption(
+        "Esta aba é informativa: lista os exames cadastrados para cargos que não "
+        "foram localizados no PCMSO. Eles não entram na contagem de faltas nem "
+        "na lista de exames extras dos cargos correspondentes."
+    )
+    if extra_cargos_df.empty:
+        st.success("Nenhum cargo extra foi identificado.")
+    else:
+        st.dataframe(extra_cargos_df, use_container_width=True, hide_index=True)
+
+with tab_exames_extras:
+    st.subheader("Exames extras em cargos que correspondem ao PCMSO")
+    st.caption(
+        "Aqui aparecem somente exames marcados no Benner que não estão previstos "
+        "para o cargo correspondente no PCMSO, ou marcados em um ASO em que o "
+        "PCMSO não prevê o exame."
+    )
     if extras_df.empty:
-        st.write("Nenhum extra foi identificado.")
+        st.success("Nenhum exame extra foi identificado em cargos correspondentes.")
     else:
-        st.dataframe(
-            extras_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(extras_df, use_container_width=True, hide_index=True)
 
-with st.expander("❌ Cargos do PCMSO não encontrados no Benner"):
+with tab_cargos_ausentes:
+    st.subheader("Cargos previstos no PCMSO não encontrados no Benner")
     if missing_roles_df.empty:
-        st.success("Todos os cargos do PCMSO tiveram correspondência.")
+        st.success("Todos os cargos do PCMSO tiveram correspondência no Benner.")
     else:
-        st.dataframe(
-            missing_roles_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(missing_roles_df, use_container_width=True, hide_index=True)
 
 excel_bytes = build_excel(
     summary,
@@ -1752,6 +1810,7 @@ excel_bytes = build_excel(
     detailed_df,
     pending_df,
     extras_df,
+    extra_cargos_df,
     missing_roles_df,
 )
 
