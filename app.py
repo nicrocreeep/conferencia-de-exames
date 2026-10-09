@@ -735,6 +735,14 @@ def requirement_for_exam(pcmso_exam: str):
     # Detecta os grupos compostos pelo nome original.
     n = normalize_exam(pcmso_exam)
 
+    # Alguns GHEs agrupam os três exames em uma única linha do PCMSO:
+    # GAMA GT + TGO + TGP. Nesses casos, o Benner pode ter três cadastros
+    # separados, e todos devem ser considerados parte do requisito composto.
+    if "GAMA GT" in n and "TGO" in n and "TGP" in n:
+        return "AND", ["GAMA_GT", "TGO", "TGP"]
+
+    # Outros GHEs trazem apenas TGO + TGP; nesses casos GAMA GT não é exigido
+    # por essa linha e continua sendo validado separadamente, se previsto.
     if "TGO" in n and "TGP" in n:
         return "AND", ["TGO", "TGP"]
 
